@@ -113,14 +113,6 @@ struct proc {
 
 extern int sched_mode;
 
-struct fcfs_queue {
-  struct spinlock lock;
-
-  struct proc *proc[NPROC];
-  int front;
-  int rear;
-};
-
 enum queue_level { L0, L1, L2_priority3, L2_priority2, L2_priority1, L2_priority0 };
 
 struct mlfq_queue {

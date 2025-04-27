@@ -80,7 +80,7 @@ usertrap(void)
   if(sched_mode == MLFQ && which_dev == 2) {
     acquire(&tickslock);
     if((ticks % 50) == 0)
-      prioboost();
+      mlfqinit();
     release(&tickslock);
     yield();
   }
@@ -159,7 +159,7 @@ kerneltrap()
   if(sched_mode == MLFQ && which_dev == 2 && myproc() != 0) {
     acquire(&tickslock);
     if((ticks % 50) == 0)
-      prioboost();
+      mlfqinit();
     release(&tickslock);
     yield();
   }

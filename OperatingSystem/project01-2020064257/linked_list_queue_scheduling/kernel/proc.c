@@ -29,7 +29,6 @@ struct spinlock wait_lock;
 int sched_mode;
 struct spinlock sched_mode_lock;
 
-struct fcfs_queue fcfs;
 struct mlfq_queue mlfq[6];
 
 void schedinit(void);
@@ -485,11 +484,9 @@ scheduler(void)
     intr_on();
     switch (sched_mode) {
       case FCFS:
-        if(((p = dequeue(-1)) != 0) && (p == current_proc)) {
-          acquire(&fcfs.lock);
-          p = fcfs.proc[1];
-          fcfs.proc[1] = current_proc;
-          release(&fcfs.lock);
+        if(((p = dequeue(0)) != 0) && (p == current_proc) && mlfq[0].head) {
+          p = dequeue(0);
+          enqueue(current_proc);
          }
         break;
       case MLFQ:
@@ -755,19 +752,15 @@ schedinit(void)
   sched_mode = FCFS;
   initlock(&sched_mode_lock, "sched_mode");
 
-  fcfs.front = 0;
-  fcfs.rear = 0;
-  initlock(&fcfs.lock, "fcfs");
-
   for(int lv = 0; lv < 6; lv++) {
     mlfq[lv].head = 0;
     mlfq[lv].tail = 0;
-    initlock(&mlfq[lv].lock, "mlfq");
+    initlock(&mlfq[lv].lock, "queue");
   }
 }
 
 void
-prioboost(void)
+mlfqinit(void)
 {
   printf("[Boost] ticks: %d\n", ticks);
   struct proc *p;
@@ -791,17 +784,22 @@ enqueue(struct proc* p)
   if (p) {
     switch (sched_mode) {
       case FCFS:
-        acquire(&fcfs.lock);
-        fcfs.proc[++fcfs.rear] = p;
-        for(int parent, i = fcfs.rear; i > 1; i = parent) {
-          parent = i / 2;
-          if(fcfs.proc[parent]->pid > fcfs.proc[i]->pid) {
-            struct proc *temp = fcfs.proc[parent];
-            fcfs.proc[parent] = fcfs.proc[i];
-            fcfs.proc[i] = temp;
-          } else break;
+        acquire(&mlfq[0].lock);
+        if(mlfq[0].head == 0)
+          mlfq[0].head = mlfq[0].tail = p;
+        else if (p->pid < mlfq[0].head->pid) {
+          p->next = mlfq[0].head;
+          mlfq[0].head = p;
+        } else {
+          struct proc *cur = mlfq[0].head;
+          while (cur->next && cur->next->pid < p->pid)
+            cur = cur->next;
+          p->next = cur->next;
+          cur->next = p;
+          if(p->next == 0)
+            mlfq[0].tail = p;
         }
-        release(&fcfs.lock);
+        release(&mlfq[0].lock);
         break;
       case MLFQ:
         int lv = p->level;
@@ -836,40 +834,17 @@ enqueue(struct proc* p)
 struct proc*
 dequeue(int level)
 {
-  struct proc *ret = 0;
-  if ((sched_mode == FCFS) || (level == -1)) {
-      acquire(&fcfs.lock);
-      if (fcfs.front == fcfs.rear)
-       ret = 0;
-      else {
-        ret = fcfs.proc[1];
-        fcfs.proc[1] = fcfs.proc[fcfs.rear--];
-        for(int min, i = 1; 2*i <= fcfs.rear; i = min) {
-          min = i;
-          int left = 2*i;
-          int right = 2*i + 1;
-          if(fcfs.proc[left]->pid < fcfs.proc[min]->pid)
-            min = left;
-          if(right <= fcfs.rear && fcfs.proc[right]->pid < fcfs.proc[min]->pid)
-            min = right;
-          if(min == i) break;
-          struct proc *temp = fcfs.proc[min];
-          fcfs.proc[min] = fcfs.proc[i];
-          fcfs.proc[i] = temp;
-        }
-      }
-      release(&fcfs.lock);
-    }
-  else if (sched_mode == MLFQ) {
-      acquire(&mlfq[level].lock);
-      if((ret = mlfq[level].head)) {
-        mlfq[level].head = ret->next;
-        if (mlfq[level].head == 0)
-          mlfq[level].tail = 0;
-        ret->next = 0;
-      }
-      release(&mlfq[level].lock);
-    }
+  struct proc *ret;
+
+  acquire(&mlfq[level].lock);
+  if((ret = mlfq[level].head)) {
+    mlfq[level].head = ret->next;
+    if (mlfq[level].head == 0)
+      mlfq[level].tail = 0;
+    ret->next = 0;
+  }
+  release(&mlfq[level].lock);
+
   return ret;
 }
 
@@ -895,31 +870,22 @@ setpriority(int pid, int priority)
 int
 mlfqmode(void)
 {
+  acquire(&sched_mode_lock);
   if(sched_mode == MLFQ) {
     printf("Already in MFLQ\n");
+    release(&sched_mode_lock);
     return -1;
   }
   else {
-    struct proc *p;
-
-    acquire(&sched_mode_lock);
     sched_mode = MLFQ;
-    release(&sched_mode_lock);
 
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      p->time_quantum = 0;
-      p->level = 0;
-      p->priority = 3;
-      release(&p->lock);
-    }
-
-    while((p = dequeue(-1)))
-      enqueue(p);
+    mlfqinit();
 
     acquire(&tickslock);
     ticks = 0;
     release(&tickslock);
+
+    release(&sched_mode_lock);
 
     return 0;
   }
@@ -928,21 +894,23 @@ mlfqmode(void)
 int
 fcfsmode(void)
 {
+  acquire(&sched_mode_lock);
   if(sched_mode == FCFS) {
     printf("Already in FCFS\n");
+    release(&sched_mode_lock);
     return -1;
   }
   else {
     struct proc* p;
 
-    acquire(&sched_mode_lock);
     sched_mode = FCFS;
-    release(&sched_mode_lock);
 
-    acquire(&mlfq[0].lock);
-    mlfq[0].head = 0;
-    mlfq[0].tail = 0;
-    release(&mlfq[0].lock);
+    for(int lv = 0; lv < 6; lv++) {
+      acquire(&mlfq[lv].lock);
+      mlfq[lv].head = 0;
+      mlfq[lv].tail = 0;
+      release(&mlfq[lv].lock);
+    }
 
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
@@ -959,6 +927,8 @@ fcfsmode(void)
     ticks = 0;
     release(&tickslock);
     
+    release(&sched_mode_lock);
+
     return 0;
   }
 }
