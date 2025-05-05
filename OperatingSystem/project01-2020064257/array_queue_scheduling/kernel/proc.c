@@ -26,7 +26,7 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
-int sched_mode;
+uint sched_mode;
 struct spinlock sched_mode_lock;
 
 struct queue mlfq_queue[3];
@@ -482,6 +482,7 @@ scheduler(void)
     // turned off; enable them to avoid a deadlock if all
     // processes are waiting.
     intr_on();
+    acquire(&sched_mode_lock);
     switch (sched_mode) {
       case FCFS:
         if(((p = dequeue(0)) != 0) && (p == current_proc)) {
@@ -501,6 +502,7 @@ scheduler(void)
         p = 0;
         break;
     }
+    release(&sched_mode_lock);
     if(p) {
       acquire(&p->lock);
       p->state = RUNNING;
@@ -510,15 +512,17 @@ scheduler(void)
 
       // Process is done running for now.
       // It should have changed its p->state before coming back.
-      if((sched_mode == MLFQ) && (++p->time_quantum >= 2*p->level + 1)) {
-        if(p->level < 2) {
-          p->level++;
-          p->time_quantum = 0;
-        }else if(p->priority > 0)
-          p->priority--;
-      }
       c->proc = 0;
       release(&p->lock);
+
+      acquire(&sched_mode_lock);
+      if(sched_mode == MLFQ) {
+        acquire(&tickslock);
+        if ((ticks % 50) == 0)
+          prioboost();
+        release(&tickslock);
+      }
+      release(&sched_mode_lock);
     }
     else {
       // nothing to run; stop running on this core until an interrupt.
@@ -562,6 +566,13 @@ yield(void)
   struct proc *p = myproc();
   acquire(&p->lock);
   p->state = RUNNABLE;
+  if((sched_mode == MLFQ) && (++p->time_quantum >= 2*p->level + 1)) {
+    if(p->level < 2) {
+      p->level++;
+      p->time_quantum = 0;
+    }else if(p->priority > 0)
+      p->priority--;
+  }
   enqueue(p);
   sched();
   release(&p->lock);
@@ -611,7 +622,13 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
-
+  if((sched_mode == MLFQ) && (++p->time_quantum >= 2*p->level + 1)) {
+    if(p->level < 2) {
+      p->level++;
+      p->time_quantum = 0;
+    }else if(p->priority > 0)
+      p->priority--;
+  }
   sched();
 
   // Tidy up.
@@ -761,7 +778,6 @@ schedinit(void)
 void
 mlfqinit(void)
 {
-  printf("[Boost] ticks: %d\n", ticks);
   struct proc *p;
 
   for(p = proc; p < &proc[NPROC]; p++) {
@@ -769,8 +785,9 @@ mlfqinit(void)
     p->time_quantum = 0;
     p->level = 0;
     p->priority = 3;
-    release(&p->lock);
+    acquire(&p->lock);
   }
+
   for(int lv = 1; lv < 3; lv++) {
     while((p = dequeue(lv))) {
       enqueue(p);
@@ -903,19 +920,21 @@ setpriority(int pid, int priority)
 int
 mlfqmode(void)
 {
+  acquire(&sched_mode_lock);
   if(sched_mode == MLFQ) {
     printf("Already in MFLQ\n");
+    release(&sched_mode_lock);
     return -1;
   }
   else {
-    acquire(&sched_mode_lock);
     sched_mode = MLFQ;
-    release(&sched_mode_lock);
 
     acquire(&tickslock);
     mlfqinit();
     ticks = 0;
     release(&tickslock);
+
+    release(&sched_mode_lock);
 
     return 0;
   }
@@ -924,16 +943,16 @@ mlfqmode(void)
 int
 fcfsmode(void)
 {
+  acquire(&sched_mode_lock);
   if(sched_mode == FCFS) {
     printf("Already in FCFS\n");
+    release(&sched_mode_lock);
     return -1;
   }
   else {
     struct proc* p;
 
-    acquire(&sched_mode_lock);
     sched_mode = FCFS;
-    release(&sched_mode_lock);
 
     acquire(&mlfq_queue[0].lock);
     mlfq_queue[0].front = 0;
@@ -953,6 +972,8 @@ fcfsmode(void)
     acquire(&tickslock);
     ticks = 0;
     release(&tickslock);
+
+    release(&sched_mode_lock);
     
     return 0;
   }

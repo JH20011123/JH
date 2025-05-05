@@ -26,13 +26,13 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
-int sched_mode;
+uint sched_mode;
 struct spinlock sched_mode_lock;
 
 struct mlfq_queue mlfq[6];
 
 void schedinit(void);
-void prioboost(void);
+void mlfqinit(void);
 void enqueue(struct proc* p);
 struct proc* dequeue(int level);
 
@@ -508,18 +508,17 @@ scheduler(void)
 
       // Process is done running for now.
       // It should have changed its p->state before coming back.
-      if(sched_mode == MLFQ) {
-        if(++p->time_quantum >= 2*p->level + 1) {
-          if(p->level < 2) {
-            p->level++;
-            p->time_quantum = 0;
-          }else if(p->priority > 0)
-            p->priority--;
-        }
-      }
-        
       c->proc = 0;
       release(&p->lock);
+
+      acquire(&sched_mode_lock);
+      if(sched_mode == MLFQ) {
+        acquire(&tickslock);
+        if ((ticks % 50) == 0)
+          mlfqinit();
+        release(&tickslock);
+      }
+      release(&sched_mode_lock);
     }
     else {
       // nothing to run; stop running on this core until an interrupt.
@@ -563,6 +562,15 @@ yield(void)
   struct proc *p = myproc();
   acquire(&p->lock);
   p->state = RUNNABLE;
+  if(sched_mode == MLFQ) {
+    if(++p->time_quantum >= 2*p->level + 1) {
+      if(p->level < 2) {
+        p->level++;
+        p->time_quantum = 0;
+      }else if(p->priority > 0)
+        p->priority--;
+    }
+  }
   enqueue(p);
   sched();
   release(&p->lock);
@@ -612,6 +620,15 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  if(sched_mode == MLFQ) {
+    if(++p->time_quantum >= 2*p->level + 1) {
+      if(p->level < 2) {
+        p->level++;
+        p->time_quantum = 0;
+      }else if(p->priority > 0)
+        p->priority--;
+    }
+  }
 
   sched();
 
@@ -762,19 +779,19 @@ schedinit(void)
 void
 mlfqinit(void)
 {
-  printf("[Boost] ticks: %d\n", ticks);
   struct proc *p;
 
   for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
     p->time_quantum = 0;
     p->level = 0;
     p->priority = 3;
+    release(&p->lock);
   }
 
   for(int lv = 1; lv < 6; lv++) {
-    while((p = dequeue(lv))) {
+    while((p = dequeue(lv)))
       enqueue(p);
-    }
   }
 }
 

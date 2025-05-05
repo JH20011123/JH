@@ -110,8 +110,6 @@ struct proc {
   int priority;                // Process priority
 };
 
-extern int sched_mode;
-
 struct queue {
   struct spinlock lock;
 
